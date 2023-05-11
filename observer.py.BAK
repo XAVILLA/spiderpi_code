@@ -1,0 +1,198 @@
+#from HiwonderSDK import Mpu6050
+from MPU6050.MPU6050 import MPU6050
+import math
+import numpy as np
+from matplotlib import pyplot as plt
+from utils import DELTA_T
+import threading
+
+class Observer:
+    def __init__(self):
+        i2c_bus = 1
+        device_address = 0x68
+        # The offsets are different for each device and should be changed
+        # accordingly using a calibration procedure
+        x_accel_offset = -4610
+        y_accel_offset = -3021
+        z_accel_offset = -530
+        x_gyro_offset = 37
+        y_gyro_offset = 21
+        z_gyro_offset = -40
+        
+        enable_debug_output = True
+
+        self.mpu = MPU6050(i2c_bus, device_address, x_accel_offset, y_accel_offset,
+                      z_accel_offset, x_gyro_offset, y_gyro_offset, z_gyro_offset,
+                      enable_debug_output)
+        self.mpu.dmp_initialize()
+        self.mpu.set_DMP_enabled(True)
+        self.packet_size = self.mpu.DMP_get_FIFO_packet_size()
+        self.FIFO_buffer = [0]*64
+        
+        self.a = [0, 0, 0]
+        self.rpy = [0,0,0]
+        self.g = [0, 0, 0]
+    
+        self.last_acceleration = None
+        self.last_angular_velocity = None
+
+        self.history = []
+    
+    def update_mpu_obs(self):
+        try:
+            FIFO_count = self.mpu.get_FIFO_count()
+            mpu_int_status = self.mpu.get_int_status()
+
+            # If overflow is detected by status or fifo count we want to reset
+            if (FIFO_count == 1024) or (mpu_int_status & 0x10):
+                self.mpu.reset_FIFO()
+            # Check if fifo data is ready
+            elif (mpu_int_status & 0x02):
+                # Wait until packet_size number of bytes are ready for reading, default
+                # is 42 bytes
+                while FIFO_count < self.packet_size:
+                    FIFO_count = self.mpu.get_FIFO_count()
+                self.FIFO_buffer = self.mpu.get_FIFO_bytes(self.packet_size)
+                raw_accel = self.mpu.DMP_get_acceleration_int16(self.FIFO_buffer) # sensor fusion acceleration readings (units: bits)
+                quat = self.mpu.DMP_get_quaternion(self.FIFO_buffer) # sensor fusion quaternion readings (units: g)
+                grav = self.mpu.DMP_get_gravity(quat) # sensor fusion projected gravity vector (units: g)
+                accel = self.mpu.DMP_get_linear_accel(raw_accel, grav) # sensor fusion accelerometer readings with gravity removed (units: bits)
+                #rpy = self.mpu.DMP_get_euler(quat) # self.get_euler_xyz_unwrapped(quat) ##DMP_get_roll_pitch_yaw(quat, grav) # sensor fusion rpy in radians
+                roll,pitch,yaw = self.get_euler_xyz_unwrapped(quat)
+                    #self.ax = accel.x / 16384 # DMP must have accelerometer sensitivity +-2g => 4g range / 16bit range = 2^16 / 4 g/bit
+                    #self.ay = accel.y / 16384
+                    #self.az = accel.z / 16384
+                    #self.gx = -grav.x # invert for same correspondence as in sim
+                    #self.gy = -grav.y # invert for same correspondence as in sim
+                    #self.gz = -grav.z # invert for same correspondence as in sim
+                    #self.roll = roll # rpy.x #roll_pitch_yaw.x # roll axis same in Isaac vs. real
+                    #self.pitch = pitch#-rpy.y #-roll_pitch_yaw.y # pitch axis inverted
+                self.a[0] = accel.x / 16384
+                self.a[1] = accel.y / 16384
+                self.a[2] = accel.z / 16384
+                self.g[0] = -grav.x
+                self.g[1] = -grav.y
+                self.g[2] = -grav.z
+                self.rpy[0] = roll
+                self.rpy[1] = pitch
+        except IOError as e:
+            print(e)
+
+    
+    def get_observation(self):
+#         try:
+#             acceleration = self.mpu.get_accel_data(g=False) # m / s^2
+#             self.last_acceleration = acceleration
+#         except Exception as e:
+#             print(e)
+#             if self.last_acceleration is not None:
+#                 acceleration = self.last_acceleration
+#             else:
+#                 acceleration = {"x": 0, "y": 0, "z": 0}
+# 
+#         try:
+#             angular_velocity = self.mpu.get_gyro_data() # degrees per second
+#             self.last_angular_velocity = angular_velocity
+#         except Exception as e:
+#             print(e)
+#             if self.last_angular_velocity is not None:
+#                 angular_velocity = self.last_angular_velocity
+#             else:
+#                 angular_velocity = {"x": 0, "y": 0, "z": 0}
+# 
+#         ax = acceleration["x"]
+#         ay = acceleration["y"]
+#         az = acceleration["z"]
+#         roll = math.atan2(ax, az) # radians
+#         pitch = math.atan2(ay, az) # radians
+#         
+#         roll = math.atan2(ay , az)
+#         pitch = math.atan2(-ax , math.sqrt(ay * ay + az * az))
+        
+        # print(ax, ay, az, roll, pitch)
+        #roll = pitch = 0
+        #ax = ay = 0
+        # az = -9
+        observation = np.array([
+            self.a[0],#self.ax,
+            self.a[1],#self.ay,
+            self.a[2],#self.az,
+            self.rpy[0], #self.rpy[0],#self.roll,#roll,
+            self.rpy[1], #self.rpy[1],#self,pitch,#pitch,
+            self.g[0],#self.roll,
+            self.g[1],#self.gx,
+            self.g[2],#self.gy,
+            #self.gz
+            #np.radians(angular_velocity["x"]), # DMP doesn't give angular velocity, only attitude, acceleration, gravity. 
+            #np.radians(angular_velocity["y"]),
+            # np.radians(angular_velocity["z"]),
+        ])
+        
+        #if len(self.history) > 0:
+            #alpha = 0.75
+            #observation = observation*(1-alpha) + self.history[-1]*alpha
+            # observation[3:5] = observation[3:5]*(1-alpha) + self.history[-1][3:5]*alpha
+        self.history.append(observation)
+        return observation[3:5]
+        #return np.concatenate((np.array([0, 0]), observation[np.array([5, 6, 3, 4])]))
+
+    def get_euler_xyz_unwrapped(self, q):
+        # roll (x-axis rotation)
+        sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z)
+        cosr_cosp = q.w * q.w - q.x * \
+            q.x - q.y * q.y + q.z * q.z
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        # pitch (y-axis rotation)
+        sinp = 2.0 * (q.w * q.y - q.z * q.x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(np.pi / 2.0, sinp)
+        else:
+            pitch = math.asin(sinp)
+
+        # yaw (z-axis rotation)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = q.w * q.w + q.x * \
+            q.x - q.y * q.y - q.z * q.z
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        return roll, pitch, yaw #roll % (2*np.pi), pitch % (2*np.pi), yaw % (2*np.pi)
+
+    def plot_history(self):
+        history = np.array(self.history).T
+        _, t = history.shape
+        t = [i * DELTA_T for i in range(t)]
+        fig, ax = plt.subplots(3, sharex=True)
+        lin_acc = history[:3]
+        ax[0].plot(t, lin_acc.T, label=["x", "y", "z"])
+        ax[0].legend()
+        ax[0].set_title("linear acceleration")
+        ax[0].set_ylabel("g")
+        lin_acc_mean, lin_acc_std = lin_acc.mean(), lin_acc.std()
+        ax[0].set_ylim(lin_acc_mean-2*lin_acc_std, lin_acc_mean+2*lin_acc_std)
+        gravity = history[5:]
+        ax[1].plot(t, gravity.T, label=["x", "y", "z"])
+        ax[1].legend()
+        ax[1].set_title("projected gravity")
+        ax[1].set_ylabel("g")
+        gravity_mean, gravity_std = gravity.mean(), gravity.std()
+        ax[1].set_ylim(gravity_mean-2*gravity_std, gravity_mean+2*gravity_std)
+        attitude = history[3:5]
+        ax[2].plot(t, attitude.T, label=["roll", "pitch"])
+        ax[2].legend()
+        ax[2].set_title("attitude")
+        ax[2].set_ylabel("radians")
+        ax[2].set_xlabel("seconds")
+        attitude_mean, attitude_std = attitude.mean(), attitude.std()
+        ax[2].set_ylim(attitude_mean-2*attitude_std, attitude_mean+2*attitude_std)
+        plt.show()
+
+    
+    def get_linear_velocity(self, delta_t):
+        velocities = [0]
+        for ax in self.ax_buffer:
+            velocity = velocities[-1] + delta_t*ax
+            velocities.append(velocity)
+        return velocities
+
+        
